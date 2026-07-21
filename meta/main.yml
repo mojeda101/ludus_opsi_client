@@ -1,0 +1,28 @@
+---
+dependencies: []
+
+galaxy_info:
+  role_name: ludus_opsi_client
+  author: mojeda101
+  description: >-
+    Enrols a Windows client into an OPSI server by installing the
+    opsi-client-agent. Defaults to a pull install (downloads the installer from
+    the configserver and runs it silently - no DCOM/firewall changes needed).
+    Optionally opens the WMI/DCOM firewall to allow server-side push instead.
+    Companion to the ludus_opsi (server) role.
+  company: ""
+  license: MIT
+  min_ansible_version: "2.12"
+  platforms:
+    - name: Windows
+      versions:
+        - all
+  galaxy_tags:
+    - ludus
+    - opsi
+    - windows
+    - client
+    - deployment
+
+collections:
+  - ansible.windows

@@ -1,0 +1,128 @@
+---
+# ============================================================================
+# ludus_opsi_client - dual purpose (controlled by opsi_client_dc):
+#   opsi_client_dc: false  (default) -> install opsi-client-agent on a Windows client
+#   opsi_client_dc: true             -> create the OPSI admin group in AD (run on the DC)
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# DC MODE: create the OPSI admin group so AD users can log into OPSI
+# Uses plain PowerShell (the AD RSAT cmdlets on the DC) - no extra collection.
+# Idempotent: New-ADGroup only if missing, Add-ADGroupMember ignores dupes.
+# ---------------------------------------------------------------------------
+- name: Ensure the OPSI admin group exists and has its members (DC)
+  ansible.windows.win_shell: |
+    Import-Module ActiveDirectory
+    if (-not (Get-ADGroup -Filter "Name -eq '{{ opsi_client_ad_group }}'")) {
+      New-ADGroup -Name '{{ opsi_client_ad_group }}' -GroupScope {{ opsi_client_ad_group_scope }} -GroupCategory Security
+    }
+    {% for m in opsi_client_ad_group_members %}
+    Add-ADGroupMember -Identity '{{ opsi_client_ad_group }}' -Members '{{ m }}' -ErrorAction SilentlyContinue
+    {% endfor %}
+  register: opsi_client_adgroup
+  changed_when: true
+  when: opsi_client_dc | bool
+
+- name: Create DNS A record for the OPSI server so the cert hostname resolves
+  ansible.windows.win_shell: |
+    Import-Module DnsServer
+    $zone = "{{ opsi_client_dns_zone }}"
+    $name = "{{ opsi_client_dns_record_name }}"
+    $ip   = "{{ opsi_client_dns_record_ip }}"
+    $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -ErrorAction SilentlyContinue
+    if (-not $existing) {
+      Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip
+      Write-Output "CREATED"
+    } else {
+      Write-Output "EXISTS"
+    }
+  register: opsi_client_dns
+  changed_when: "'CREATED' in opsi_client_dns.stdout"
+  when: opsi_client_dc | bool and opsi_client_dns_record_ip | length > 0
+
+- name: Report AD group + DNS setup
+  ansible.builtin.debug:
+    msg:
+      - "OPSI admin group '{{ opsi_client_ad_group }}' ensured with members: {{ opsi_client_ad_group_members | join(', ') }}"
+      - "DNS A record {{ opsi_client_dns_record_name }}.{{ opsi_client_dns_zone }} -> {{ opsi_client_dns_record_ip }}: {{ opsi_client_dns.stdout | default('skipped') }}"
+  when: opsi_client_dc | bool
+
+# ---------------------------------------------------------------------------
+# CLIENT MODE: install the opsi-client-agent (pull)
+# ---------------------------------------------------------------------------
+- name: Client-agent tasks
+  when: not (opsi_client_dc | bool)
+  block:
+    - name: Optionally allow DCOM/WMI inbound (only for server-side push; not needed for pull)
+      ansible.windows.win_shell: >-
+        Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)"
+      when: opsi_client_enable_wmi_firewall | bool
+      changed_when: false
+
+    - name: Check whether the opsiclientd service already exists
+      ansible.windows.win_service_info:
+        name: opsiclientd
+      register: opsi_client_svc
+      failed_when: false
+
+    - name: Install the opsi-client-agent (pull)
+      when: opsi_client_force_reinstall | bool or not (opsi_client_svc.exists | default(false))
+      block:
+        - name: Assert a service password was provided
+          ansible.builtin.assert:
+            that:
+              - opsi_client_service_password | length > 0
+            fail_msg: >-
+              opsi_client_service_password is empty. Set it (role_vars /
+              global_role_vars / vault) to an opsi admin password so the agent
+              can register with the configserver.
+
+        - name: Download the opsi-client-agent installer from the configserver
+          ansible.windows.win_get_url:
+            url: "{{ opsi_client_installer_url }}"
+            dest: "{{ ansible_env.TEMP }}\\opsi-client-agent-installer.exe"
+            validate_certs: false
+          register: opsi_client_dl
+
+        - name: Run the installer silently
+          ansible.windows.win_command: >-
+            "{{ ansible_env.TEMP }}\\opsi-client-agent-installer.exe"
+            {{ opsi_client_setup_args }}
+            {{ ('--client-id ' ~ opsi_client_id) if opsi_client_id | length > 0 else '' }}
+          register: opsi_client_setup
+          changed_when: true
+          failed_when: opsi_client_setup.rc is defined and opsi_client_setup.rc != 0
+          no_log: true
+          async: 120
+          poll: 10
+
+    - name: Reboot the client so opsiclientd starts cleanly on boot
+      ansible.windows.win_reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 30
+        msg: "Rebooting after opsi-client-agent installation"
+
+    - name: Ensure opsiclientd is running after reboot
+      ansible.windows.win_service:
+        name: opsiclientd
+        state: started
+        start_mode: auto
+      register: opsi_client_svc_start
+      failed_when: false
+      retries: 5
+      delay: 10
+      until: opsi_client_svc_start.state is defined and opsi_client_svc_start.state == 'started'
+
+    - name: Verify opsiclientd is running after reboot
+      ansible.windows.win_service_info:
+        name: opsiclientd
+      register: opsi_client_svc_after
+      failed_when: false
+
+    - name: Report agent status
+      ansible.builtin.debug:
+        msg: >-
+          opsi-client-agent {{ 'installed and running' if (opsi_client_svc_after.exists | default(false)
+          and opsi_client_svc_after.state | default('') == 'started')
+          else 'NOT running after reboot - check C:\\opsi.org\\log\\' }}
+          (configserver {{ opsi_client_configserver }})

@@ -1,0 +1,65 @@
+---
+# ============================================================================
+# ludus_opsi_client - enrol a Windows client into OPSI (opsi-client-agent)
+# ----------------------------------------------------------------------------
+# LAB USE ONLY. Companion to the ludus_opsi server role.
+# ============================================================================
+
+# Configserver the agent registers against. MUST be reachable from THIS client
+# (use the OPSI server's IP to avoid any DNS dependency).
+opsi_client_configserver: "https://10.16.10.20:4447"
+
+# opsi service account used to register the client (an opsiadmin account).
+# 'adminuser' + the ludus_opsi_admin_password works out of the box.
+opsi_client_service_user: "adminuser"
+opsi_client_service_password: ""        # set via vault / global_role_vars / role_vars
+
+# Explicit opsi client-id. Empty = let the agent auto-detect from the machine's
+# FQDN (correct for domain-joined members, matches the AD-synced client object).
+opsi_client_id: ""
+
+# Where to fetch the installer (defaults to the configserver's public depot).
+opsi_client_installer_url: "{{ opsi_client_configserver }}/public/opsi-client-agent/opsi-client-agent-installer.exe"
+
+# Reinstall even if opsiclientd is already present.
+opsi_client_force_reinstall: false
+
+# Silent install arguments for opsi-client-agent-installer.exe.
+# Verified against the installer's --help (opsi-client-agent 4.3.x):
+#   --finalize accepts: noreboot | reboot | shutdown  (NOT start_service)
+#   --non-interactive: do not ask questions
+#   --no-gui: no GUI window
+opsi_client_setup_args: >-
+  --no-gui
+  --non-interactive
+  --service-address {{ opsi_client_configserver }}
+  --service-username {{ opsi_client_service_user }}
+  --service-password {{ opsi_client_service_password }}
+  --finalize noreboot
+
+# Optional: open DCOM/WMI inbound so the OPSI SERVER can push the agent.
+# NOT needed for the default pull install. Only enable if you specifically want
+# to test/allow server-side opsi-deploy-client-agent (which uses DCOM/WMI).
+opsi_client_enable_wmi_firewall: false
+
+# ---------------------------------------------------------------------------
+# DC mode (run this role on the primary DC with opsi_client_dc: true)
+# Creates the OPSI admin group in AD so AD users can log into OPSI. The client
+# agent install is skipped in this mode.
+# ---------------------------------------------------------------------------
+opsi_client_dc: false
+opsi_client_ad_group: "opsiadmin"          # must match ludus_opsi_ad_login_admin_group
+opsi_client_ad_group_scope: "Global"       # Global | DomainLocal | Universal
+opsi_client_ad_group_members:              # existing accounts to add (idempotent)
+  - domainadmin
+
+# ---------------------------------------------------------------------------
+# DC mode: DNS A record for the OPSI server
+# ---------------------------------------------------------------------------
+# Creates an A record so clients resolve the server by hostname (matching the
+# TLS cert CN) instead of IP, avoiding SSL cert verification errors in
+# opsiclientd ("IP address mismatch"). Set opsi_client_dns_record_ip to the
+# OPSI server's IP. Leave empty to skip DNS record creation.
+opsi_client_dns_zone: "ludus.domain"
+opsi_client_dns_record_name: "opsi"           # -> opsi.ludus.domain
+opsi_client_dns_record_ip: ""                 # e.g. "10.16.10.20" - set in role_vars
